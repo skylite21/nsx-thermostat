@@ -8,7 +8,7 @@ This is simple thermostat specifically for the SonOFF NSPanel **not the pro vers
 - control the relay to turn on/off the heater (L1)
 - Display local outside temperature fetched from open-meteo.com
 
-![UI](images/ui.png)
+![UI](images/demo.png)
 
 ## Installation
 
