@@ -5,6 +5,14 @@ tasmota.cmd("State") # Display current device state and publish to %prefix%/%top
 tasmota.cmd("TelePeriod")
 
 var saved_outdoor_temp = persist.has("saved_outdoor_temp") ? persist.saved_outdoor_temp : "00"
+var current_indoor_temp = "00"
+
+var no_touch_sleep_timer = 30
+var touch_wake = 1
+var desired_temp = persist.has("desired_temp") ? persist.desired_temp : "00"
+print("Desired temperature: after reboot:  " + desired_temp)
+
+persist.save()
 
 
 # utility function of returning the minimum of two numbers
@@ -15,6 +23,7 @@ def min(a, b)
       return b
   end
 end
+
 
 class Nextion : Driver
 
@@ -211,6 +220,20 @@ class Nextion : Driver
         end
     end
 
+    def handle_thermostat()
+      if current_indoor_temp == "00" || desired_temp == "00"
+        return
+      end
+      self.send_raw_nextion_command('targetTemp.val='+desired_temp)
+      if int(current_indoor_temp) < int(desired_temp)
+        tasmota.cmd("Power1 1")
+        self.send_raw_nextion_command('vis heat,1')
+      else
+        tasmota.cmd("Power1 0")
+        self.send_raw_nextion_command('vis heat,0')
+      end
+    end
+
     # Function called every 100 milliseconds to process incoming data
     def every_100ms()
         if self.serial_port.available() > 0
@@ -261,7 +284,15 @@ class Nextion : Driver
                     # these two lines are all I need I think
                     var string_message = message.asstring()
                     print("My Received message = " + string_message)
-                    # these are not even neede0d
+                    # if string starts with desired: then save the value after the colon
+                    if string.find(string_message, "desired:")>=0
+                        desired_temp = string.split(string_message, ":")[1]
+                        persist.desired_temp = desired_temp
+                        print("Desired temperature: " + desired_temp)
+                        persist.save()
+                        self.handle_thermostat()
+                    end
+                    # these are not really needed but I keep them for reference
                     for i:0..size(messages)-1
                         message = messages[i]
                         if size(message) > 0
@@ -547,6 +578,7 @@ def get_weather()
     print(b)
     var weather = weather_code_list[str(b['current']['weather_code'])]
     log('NSP: Weather update: ' + str(temp) + '°C, ' + weather, 3)
+    persist.saved_outdoor_temp = temp
     return temp
   else
     log('NSP: Weather update failed!', 3)
@@ -561,6 +593,7 @@ def set_indoor_temp()
   var sensors=json.load(tasmota.read_sensors())
   log('NSP: Indoor temperature: ' + str(sensors), 3)
   var temperature = str(math.round(sensors['ANALOG']['Temperature1']))
+  current_indoor_temp = temperature
   nextion.send_raw_nextion_command('insideTemp.txt="'+temperature+'"')
 end
 
@@ -569,10 +602,9 @@ def set_outdoor_temp()
   nextion.send_raw_nextion_command('outsideTemp.txt="'+temperature+'"')
 end
 
-def task2()
-  nextion.send_raw_nextion_command('print t0.txt')
+def set_initial_thermostat()
+  nextion.handle_thermostat()
 end
-
 
 # WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
 # to fix temperature readings (much more accurate results after this)
@@ -584,6 +616,8 @@ tasmota.add_cron("*/10 * * * * *", set_indoor_temp, 'set_indoor_temp')
 tasmota.set_timer(2000, set_outdoor_temp)
 tasmota.add_cron("*/60 * * * * *", set_outdoor_temp, 'set_outdoor_temp')
 
-# tasmota.set_timer(1000, task2)
+tasmota.set_timer(50, set_initial_thermostat)
 
-# a kazán vezérlésnél nagyon kell figyelni hogy hiszterézis legyen, mert a relé akkor folyamatosan kapcsolgat ha nincs!!
+def hold_desired_temp()
+    # TODO: hysteresis is needed so that when the temperature is close to the desired value the relay does not switch on and off
+end
