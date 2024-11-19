@@ -35,3 +35,13 @@ After reboot, use the following to flash the display in the console:
 
 FlashNextion http://192.168.1.6:8000/nsx.tft
 ```
+
+# Configuration
+
+The temperature sensor in the SonOFF NSPanel is not very accurate. If you enter this command in the console, you improve it bit. Not going to be berfect but better.
+
+```bash
+
+```
+ADCParam1 2,12400,8800,3950
+```

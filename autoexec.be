@@ -1,14 +1,11 @@
 import persist
 var devicename = tasmota.cmd("DeviceName")["DeviceName"]
 
-var loc = persist.has("loc") ? persist.loc : "North Pole"
-persist.save() # save persist file until serial bug fixed
-
-# tasmota.cmd("Rule3 1") # needed until Berry bug fixed
 tasmota.cmd("State") # Display current device state and publish to %prefix%/%topic%/RESULT topic 
-
-
 tasmota.cmd("TelePeriod")
+
+var saved_outdoor_temp = persist.has("saved_outdoor_temp") ? persist.saved_outdoor_temp : "00"
+
 
 # utility function of returning the minimum of two numbers
 def min(a, b)
@@ -553,7 +550,7 @@ def get_weather()
     return temp
   else
     log('NSP: Weather update failed!', 3)
-    return "00"
+    return saved_outdoor_temp
   end
 end
 
@@ -575,8 +572,6 @@ end
 def task2()
   nextion.send_raw_nextion_command('print t0.txt')
 end
-
-
 
 
 # WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
