@@ -1,24 +1,44 @@
 import persist
 import math
 import json
-var devicename = tasmota.cmd("DeviceName")["DeviceName"]
+import string
 
-tasmota.cmd("State") # Display current device state and publish to %prefix%/%topic%/RESULT topic 
-tasmota.cmd("TelePeriod")
+# NOTE: inside the nextion display we treat everything as string even if they
+# are numbers. This is necessary because if the nextion display sends back
+# data, we identify it sort of as a query string in the url, so it's :
+# "brightness=100&desired=20" this is what the nextion driver receives
 
-var saved_outdoor_temp = persist.has("saved_outdoor_temp") ? int(persist.saved_outdoor_temp) : "00"
+var saved_outdoor_temp = persist.has("saved_outdoor_temp") ? persist.saved_outdoor_temp : 0
 var brightness = persist.has("brightness") ? persist.brightness : 100
-var current_indoor_temp = "00"
-var current_outdoor_temp = "00"
-
-var no_touch_sleep_timer = 30
-var touch_wake = 1
-var desired_temp = persist.has("desired_temp") ? persist.desired_temp : "00"
-print("Desired temperature: after reboot:  " + desired_temp)
-
+var desired_temp = persist.has("desired_temp") ? persist.desired_temp : 20
 var last_state_change_time = persist.has("last_state_change_time") ? persist.last_state_change_time : tasmota.millis() - (5 * 60 * 1000)
 
 persist.save()
+
+var current_outdoor_temp = saved_outdoor_temp
+var current_indoor_temp = 0
+var no_touch_sleep_timer = 30
+print("Desired temperature: after reboot:  " + str(desired_temp))
+
+tasmota.cmd("State") # Display current device state and publish to %prefix%/%topic%/RESULT topic 
+tasmota.cmd("TelePeriod") # See current value and force publish STATE and SENSOR message
+
+# Map of return code meanings
+#TODO make use of this in the nextion driver
+var return_code_meanings = {
+    0x00: "Invalid instruction",
+    0x01: "Instruction executed successfully",
+    0x02: "Component ID invalid or does not exist",
+    0x03: "Page ID invalid or does not exist",
+    0x04: "Picture ID invalid or does not exist",
+    0x05: "Font ID invalid or does not exist",
+    0x1A: "Invalid variable name or attribute",
+    0x1B: "Invalid variable operation",
+    0x1C: "Failed to assign",
+    0x66: "Current page number is",
+    0x1E: "Invalid number of parameters",
+    # Add other codes as needed
+}
 
 
 # utility function of returning the minimum of two numbers
@@ -54,6 +74,15 @@ class Nextion : Driver
     var last_percentage  # Last reported percentage of flashing completed
     var firmware_url  # URL of the firmware to download and flash
 
+    # Initialization function
+    def init()
+        log("NXP: Initializing Driver")
+        self.serial_port = serial(17, 16, 115200, serial.SERIAL_8N1)
+        self.flash_mode = 0
+        self.flash_protocol_version = 1
+        self.flash_protocol_baud = 9600
+    end
+
     # Function to split a byte stream into messages at header bytes (0x55BB).
     # Each message starts with the header 0x55BB. This function extracts those
     # messages and returns them as a list of byte chunks.
@@ -74,44 +103,6 @@ class Nextion : Driver
         return message_list
     end
 
-    # Function to compute a CRC-16 checksum using MOBUS algorithm for a given data byte sequence.
-    # The CRC is calculated using the MODBUS algorithm, which ensures that data 
-    # integrity can be verified during transmission.
-    # Input:
-    # - data: Byte sequence to calculate the CRC for
-    # - polynomial: (Optional) The polynomial used for the CRC calculation (default: 0xA001)
-    def crc16(data, polynomial)
-        if !polynomial  
-            polynomial = 0xA001  # Default polynomial for MODBUS
-        end
-        # Initialize CRC to 0xFFFF as per MODBUS specification
-        var crc = 0xFFFF 
-        # Iterate through each byte in the input data
-        for i:0..size(data)-1
-            crc = crc ^ data[i]  # XOR current byte with CRC
-            for j:0..7  # Process each bit in the byte
-                if crc & 1
-                    crc = (crc >> 1) ^ polynomial  # If LSB (least significant bit) is 1, shift and XOR with polynomial
-                else
-                    crc = crc >> 1  # If LSB is 0, just shift without XOR
-                end
-            end
-        end
-        return crc  # Return the calculated CRC value
-    end
-
-    # Function to encode payload using custom protocol
-    # Format: [Header][Payload Length][Payload][CRC]
-    def encode(payload)
-        var message_bytes = bytes()
-        message_bytes += self.header  # Add header bytes
-        message_bytes.add(size(payload), 2)  # Add payload size as 2 bytes (little endian)
-        message_bytes += bytes().fromstring(payload)  # Add the actual payload
-        var checksum = self.crc16(message_bytes)  # Calculate CRC checksum of the message
-        message_bytes.add(checksum, 2)  # Add CRC checksum as 2 bytes
-        return message_bytes  # Return the complete message
-    end
-
     # Function to encode Nextion commands
     def encode_nextion_command(command)
         var command_bytes = bytes().fromstring(command)
@@ -121,26 +112,9 @@ class Nextion : Driver
 
     # Function to send Nextion commands to the display
     def send_nextion_command(command)
-        import string
         var command_bytes = self.encode_nextion_command(command)
         self.serial_port.write(command_bytes)
         log(string.format("NXP: Nextion command sent = %s", str(command_bytes)), 3)       
-    end
-
-    # Function to send payload using custom protocol
-    def send(payload)
-        var message_bytes = self.encode(payload)
-        if self.flash_mode == 1
-            log("NXP: Skipped command because device is still flashing", 3)
-        else 
-            self.serial_port.write(message_bytes)
-            log("NXP: Payload sent = " + str(message_bytes), 3)
-        end
-    end
-
-    # Function to write bytes directly to the Nextion display
-    def write_to_nextion(data_bytes)
-        self.serial_port.write(data_bytes)
     end
 
     # Function to initialize the screen
@@ -151,7 +125,6 @@ class Nextion : Driver
 
     # Function to write a block of data to the Nextion display during flashing
     def write_block()
-        import string
         log("FLH: Starting write_block", 3)
         while self.flash_written < self.flash_size
             # Fill flash buffer with data from TCP until it's full or no more data
@@ -204,7 +177,7 @@ class Nextion : Driver
                 var percentage = int((self.flash_written * 100) / self.flash_size)
                 if self.last_percentage != percentage
                     self.last_percentage = percentage
-                    tasmota.publish_result("{\"Flashing\":{\"complete\":" + str(percentage) + ",\"time_elapsed\":" + str((tasmota.millis() - self.flash_start_time_ms) / 1000) + "}}", "RESULT")
+                    print("{\"Flashing\":{\"complete\":" + str(percentage) + ",\"time_elapsed\":" + str((tasmota.millis() - self.flash_start_time_ms) / 1000) + "}}", "RESULT")
                 end
             else
                 if !self.tcp_connection.connected()
@@ -216,18 +189,20 @@ class Nextion : Driver
         end
         # Check if flashing is complete
         if self.flash_written >= self.flash_size
-            log("FLH: Flashing complete - Time elapsed: " + str((tasmota.millis() - self.flash_start_time_ms) / 1000) + " seconds", 3)
+            print("FLH: Flashing complete - Time elapsed: " + str((tasmota.millis() - self.flash_start_time_ms) / 1000) + " seconds")
             self.flash_mode = 0
             # Reset serial port to default baud rate
             self.serial_port.deinit()
             self.serial_port = serial(17, 16, 115200, serial.SERIAL_8N1)
+            tasmota.delay(1000)
+            # restart tasmota when the flasing is complete
+            tasmota.cmd("Restart 1")
         else
             log("FLH: Flashing incomplete, total written: " + str(self.flash_written) + " bytes", 2)
         end
     end
 
     def get_weather()
-      import json
       var weather_code_list = {
         "0": "Clear sky",
         "1": "Mainly clear",
@@ -282,10 +257,10 @@ class Nextion : Driver
     end
 
     def handle_thermostat()
-      if current_indoor_temp == "00" || desired_temp == "00"
+      if current_indoor_temp == 0 || desired_temp == 0
         return
       end
-      self.send_raw_nextion_command('targetTemp.val='+desired_temp)
+      self.send_raw_nextion_command('targetTemp.val='+str(desired_temp))
       if int(current_indoor_temp) < int(desired_temp)
         tasmota.cmd("Power1 1")
         self.send_raw_nextion_command('vis heat,1')
@@ -297,7 +272,7 @@ class Nextion : Driver
 
     def set_indoor_temp()
       var sensors=json.load(tasmota.read_sensors())
-      log('NSP: Indoor temperature: ' + str(sensors), 3)
+      log('SENSOR: Indoor temperature: ' + str(sensors), 3)
       current_indoor_temp = int(sensors['ANALOG']['Temperature1'])
       var indor_temp = str(math.round(sensors['ANALOG']['Temperature1']))
       self.send_raw_nextion_command('insideTemp.txt="'+indor_temp+'"')
@@ -307,12 +282,30 @@ class Nextion : Driver
     def set_outdoor_temp()
       current_outdoor_temp = self.get_weather()
       var outdoor_temp = str(math.round(current_outdoor_temp))
+      log('NSP: Outdoor temperature: ' + outdoor_temp + '°C', 3)
       self.send_raw_nextion_command('outsideTemp.txt="'+outdoor_temp+'"')
     end
 
     def update_temps()
       tasmota.set_timer(55, / -> self.set_indoor_temp())
       tasmota.set_timer(245, / -> self.set_outdoor_temp())
+    end
+
+    # The nextion will send the data in a query string-like syntax (because
+    # that is how I chosed doing from nsx.hmi) so we need to parse it
+    def parse_querystring(qs)
+        import string
+        var result = {}  # Initialize an empty dictionary
+        var pairs = string.split(qs, '&')  # Split the string by '&' to get key-value pairs
+        for pair : pairs  # Corrected 'for' loop syntax
+            var idx = string.find(pair, '=')
+            if idx >= 0
+                var key = pair[0..(idx - 1)]
+                var value = pair[(idx + 1)..]
+                result[key] = value
+            end
+        end
+        return result
     end
 
 
@@ -322,44 +315,9 @@ class Nextion : Driver
             var message = self.serial_port.read()
             print("NXP: Received Raw =", message)
             if size(message) > 0
-                import string
                 print(string.format("NXP: Received Raw = %s", str(message)), 3)
                 if (self.flash_mode == 1)
-                    # Handle messages during flashing
-                    var message_str = message[0..-4].asstring()
-                    if string.find(message_str, "comok 2")>=0
-                        tasmota.delay(50)
-                        log("FLH: Send (High Speed) flash start")
-                        self.flash_start_time_ms = tasmota.millis()
-                        if self.flash_protocol_version == 0
-                            self.send_nextion_command(string.format("whmi-wri %d,%d,res0", self.flash_size, self.flash_protocol_baud))
-                        else
-                            self.send_nextion_command(string.format("whmi-wris %d,%d,res0", self.flash_size, self.flash_protocol_baud))
-                        end
-                        if self.flash_protocol_baud != 115200
-                            tasmota.delay(50)
-                            self.serial_port.deinit()
-                            self.serial_port = serial(17, 16, self.flash_protocol_baud, serial.SERIAL_8N1)
-                        end
-                    elif size(message)==1 && message[0]==0x08
-                        log("FLH: Waiting for offset...", 3)
-                        self.waiting_for_offset = 1
-                    elif size(message) == 4 && self.waiting_for_offset == 1
-                        self.waiting_for_offset = 0
-                        self.flash_offset = message.get(0, 4)
-                        log("FLH: Flash offset marker " + str(self.flash_offset), 3)
-                        if self.flash_offset != 0
-                            print("Sending the url to open_url_at")
-                            print(self.firmware_url)
-                            self.open_url_at(self.firmware_url, self.flash_offset)
-                            self.flash_written = self.flash_offset
-                        end
-                        self.write_block()
-                    elif size(message)==1 && message[0]==0x05
-                        self.write_block()
-                    else
-                        log("FLH: Something has gone wrong flashing display firmware [" + str(message) + "]", 2)
-                    end
+                  self.run_flashing_process(message)
                 else
                     # IF touch event 0x68 occurs call self.update_temps
                     # Check for the Touch Coordinate (sleep) event (0x68)
@@ -375,21 +333,22 @@ class Nextion : Driver
                     # these two lines are all I need I think
                     var string_message = message.asstring()
                     print("My Received message = " + string_message)
+
+                    var data = self.parse_querystring(string_message)
                     # if string starts with desired: then save the value after the colon
-                    if string.find(string_message, "desired:")>=0
-                        desired_temp = int(string.split(string_message, ":")[1])
-                        persist.desired_temp = int(desired_temp)
-                        print("Desired temperature: " + desired_temp)
+                    if data.has("desired")
+                        desired_temp = data["desired"]
+                        persist.desired_temp = int(data["desired"])
                         persist.save()
+                        log("Desired temperature: " + data["desired"], 3)
                         self.handle_thermostat()
 
                     end
-                    if string.find(string_message, "brightness:")>=0
-                        brightness = string.split(string_message, ":")[1]
-                        brightness = string.split(brightness, "&")[0]
+                    if data.has("brightness")
+                        brightness = data["brightness"]
                         persist.brightness = int(brightness)
-                        print("Brightness: " + brightness)
                         persist.save()
+                        log("Brightness: " + brightness, 3)
                     end
 
                     # these are not really needed but I keep them for reference
@@ -417,27 +376,7 @@ class Nextion : Driver
         end
     end      
 
-    # Function to begin the flashing process
-    def begin_nextion_flash()
-        # We need to reinitialize the serial port for flashing
-        self.serial_port.deinit()
-        self.serial_port = serial(17, 16, 115200, serial.SERIAL_8N1)
-        self.flash_written = 0
-        self.waiting_for_offset = 0
-        self.flash_offset = 0
-        print("Sending flash start command")
-        self.send_nextion_command('DRAKJHSUYDGBNCJHGJKSHBDN')  # Magic string to initiate flash mode
-        print("Disabling protocol reparse mode")
-        self.send_nextion_command('recmod=0')
-        self.send_nextion_command('recmod=0')
-        self.flash_mode = 1
-        print("Flash mode enabled")
-        self.send_nextion_command("connect")        
-        print("Connecting to Nextion display")
-    end
-
     def parse_url(url)
-      import string
       var protocol = ""
       var host = ""
       var port = 0
@@ -477,18 +416,17 @@ class Nextion : Driver
       return result
     end
 
-# Function to send a Nextion command and print response
-  def send_raw_nextion_command(command)
-      print("NXP: Sending command: " + command)
-      var b = bytes().fromstring(command)
-      b += bytes('FFFFFF')  # Add termination bytes
-      self.serial_port.write(b)
-  end
+    # Function to send a Nextion command and print response
+    def send_raw_nextion_command(command)
+        print("NXP: Sending command: " + command)
+        var b = bytes().fromstring(command)
+        b += bytes('FFFFFF')  # Add termination bytes
+        self.serial_port.write(b)
+    end
 
     
     # Function to open the firmware URL at a specific position (offset)
     def open_url_at(url, position)
-        import string
         self.firmware_url = url
         var url_components = self.parse_url(url)  # Use the parse_url function
         var host = url_components["host"]
@@ -556,7 +494,7 @@ class Nextion : Driver
                 var content_length_end = string.find(headers, "\r\n", content_length_idx)
                 var content_length_str = headers[(content_length_idx + size(tag))..(content_length_end - 1)]
                 self.flash_size = int(content_length_str)
-                log("FLH: Flash file size: " + str(self.flash_size), 3)
+                print("FLH: Flash file size: " + str(self.flash_size))
             else
                 log("FLH: Content-Length header not found.", 2)
                 return -1
@@ -583,14 +521,63 @@ class Nextion : Driver
         end
     end
 
-    # Initialization function
-    def init()
-        log("NXP: Initializing Driver")
+    # Function to begin the flashing process
+    def begin_nextion_flash()
+        # We need to reinitialize the serial port for flashing
+        self.send_nextion_command('sleep=0')
+        self.send_nextion_command('sleep=0')
+        tasmota.delay(1000)
+        self.serial_port.deinit()
         self.serial_port = serial(17, 16, 115200, serial.SERIAL_8N1)
-        self.flash_mode = 0
-        self.flash_protocol_version = 1
-        self.flash_protocol_baud = 9600
+        # wake the screen up
+        self.flash_written = 0
+        self.waiting_for_offset = 0
+        self.flash_offset = 0
+        log("FLH: Sending flash start command", 3)
+        self.send_nextion_command('DRAKJHSUYDGBNCJHGJKSHBDN')  # Magic string to initiate flash mode
+        log("FLH: Disabling protocol reparse mode", 3)
+        self.send_nextion_command('recmod=0')
+        self.send_nextion_command('recmod=0')
+        # this will make the flashing start in the every_100ms method
+        self.flash_mode = 1
+        log("FLH: Flash mode enabled", 3)
+        self.send_nextion_command("connect")        
+        log("FLH: Flashing initiated", 3)
     end
+
+    def run_flashing_process(message)
+      # Handle messages during flashing
+      var message_str = message[0..-4].asstring()
+      if string.find(message_str, "comok 2")>=0
+          tasmota.delay(50)
+          log("FLH: Send (High Speed) flash start")
+          self.flash_start_time_ms = tasmota.millis()
+          if self.flash_protocol_version == 0
+              self.send_nextion_command(string.format("whmi-wri %d,%d,res0", self.flash_size, self.flash_protocol_baud))
+          else
+              self.send_nextion_command(string.format("whmi-wris %d,%d,res0", self.flash_size, self.flash_protocol_baud))
+          end
+      elif size(message)==1 && message[0]==0x08
+          log("FLH: Waiting for offset...", 3)
+          self.waiting_for_offset = 1
+      elif size(message) == 4 && self.waiting_for_offset == 1
+          self.waiting_for_offset = 0
+          self.flash_offset = message.get(0, 4)
+          log("FLH: Flash offset marker " + str(self.flash_offset), 3)
+          if self.flash_offset != 0
+              print("Sending the url to open_url_at")
+              print(self.firmware_url)
+              self.open_url_at(self.firmware_url, self.flash_offset)
+              self.flash_written = self.flash_offset
+          end
+          self.write_block()
+      elif size(message)==1 && message[0]==0x05
+          self.write_block()
+      else
+          log("FLH: Something has gone wrong flashing display firmware [" + str(message) + "]", 2)
+      end
+    end
+
 
 end
 
@@ -612,25 +599,6 @@ def flash_nextion(cmd, idx, payload, payload_json)
 end
 
 tasmota.add_cmd('FlashNextion', flash_nextion)
-
-# initialize serial port as a global variable
-# serial_port = serial(17, 16, 115200, serial.SERIAL_8N1)
-
-# Map of return code meanings
-var return_code_meanings = {
-    0x00: "Invalid instruction",
-    0x01: "Instruction executed successfully",
-    0x02: "Component ID invalid or does not exist",
-    0x03: "Page ID invalid or does not exist",
-    0x04: "Picture ID invalid or does not exist",
-    0x05: "Font ID invalid or does not exist",
-    0x1A: "Invalid variable name or attribute",
-    0x1B: "Invalid variable operation",
-    0x1C: "Failed to assign",
-    0x66: "Current page number is",
-    0x1E: "Invalid number of parameters",
-    # Add other codes as needed
-}
 
 def set_indoor_temp()
   nextion.set_indoor_temp()
@@ -656,26 +624,11 @@ def set_initial_outdoor_temp()
   end
 end
 
-
-# WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
-# to fix temperature readings (much more accurate results after this)
-# ADCParam1 2,12400,8800,3950
-
-tasmota.set_timer(0, configure_brightness)
-
-tasmota.set_timer(100, set_indoor_temp)
-tasmota.add_cron("*/10 * * * * *", set_indoor_temp, 'set_indoor_temp')
-tasmota.set_timer(200, set_initial_outdoor_temp)
-
-tasmota.set_timer(2000, set_outdoor_temp)
-tasmota.add_cron("*/60 * * * * *", set_outdoor_temp, 'set_outdoor_temp')
-
-tasmota.set_timer(50, set_initial_thermostat)
-
-
 def hold_desired_temp()
     # Check if temperature readings are valid
-    if current_indoor_temp == "00" || desired_temp == "00"
+    print("Holding desired temperature: " + str(desired_temp)+ " while current indoor temp is: " + str(current_indoor_temp))
+    if current_indoor_temp == 0 || desired_temp == 0
+        print("Current indoor temp is 0 or desired temp is 0 doing nothing")
         return
     end
 
@@ -711,15 +664,18 @@ def hold_desired_temp()
         end
     else
         # Within the minimum switch interval; maintain current heater state
+        print("Within the minimum switch interval; maintain current heater state")
         heater_should_be_on = heater_is_on
     end
 
     # Update heater state if it has changed
     if heater_should_be_on != heater_is_on
         if heater_should_be_on
+            print("Turning heater ON because current temperature is below threshold")
             tasmota.cmd("Power1 ON")  # Turn heater ON
             nextion.send_raw_nextion_command('vis heat,1')  # Show heating indicator
         else
+            print("Turning heater OFF because current temperature is above threshold")
             tasmota.cmd("Power1 OFF")  # Turn heater OFF
             nextion.send_raw_nextion_command('vis heat,0')  # Hide heating indicator
         end
@@ -728,6 +684,7 @@ def hold_desired_temp()
         persist.last_state_change_time = last_state_change_time  # Save persistently
         persist.save()
     else
+        print("No change in heater state required, updating display only")
         # Ensure the heating indicator matches the current heater state
         if heater_is_on
             nextion.send_raw_nextion_command('vis heat,1')
@@ -737,14 +694,28 @@ def hold_desired_temp()
     end
 
     # Update the target temperature on the Nextion display
-    nextion.send_raw_nextion_command('targetTemp.val=' + desired_temp)
+    print("Updating target temperature on Nextion display: " + str(desired_temp))
+    nextion.send_raw_nextion_command('targetTemp.val=' + str(desired_temp))
 end
 
+# WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
+# to fix temperature readings (much more accurate results after this)
+# ADCParam1 2,12400,8800,3950
+
+tasmota.set_timer(0, configure_brightness)
+tasmota.set_timer(50, set_indoor_temp)
+tasmota.set_timer(100, set_initial_thermostat)
+tasmota.set_timer(200, set_initial_outdoor_temp)
+tasmota.set_timer(2000, set_outdoor_temp)
+
+tasmota.add_cron("*/60 * * * * *", set_outdoor_temp, 'set_outdoor_temp')
+tasmota.add_cron("*/10 * * * * *", set_indoor_temp, 'set_indoor_temp')
 
 # Schedule the hold_desired_temp function to run every 5 minutes
-tasmota.add_cron("0 */5 * * * *", hold_desired_temp, 'hold_desired_temp')
+#TODO change this back to */5 * * * * * after deving
+tasmota.add_cron("0 */1 * * * *", hold_desired_temp, 'hold_desired_temp')
 
-# hold_desired_temp is fucked up 17:20:00.308 BRY: Exception> 'type_error' - unsupported operand type(s) for -: 'string' and 'real'
 # TODO make the physical buttons work: up, down, desired temp
 # TODO restore the brightness setting on the settings page
 # TODO Add restart button in settings!
+# TODO after going back from settings the home page is not updated properly
