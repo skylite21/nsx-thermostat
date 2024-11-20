@@ -620,4 +620,7 @@ tasmota.set_timer(50, set_initial_thermostat)
 
 def hold_desired_temp()
     # TODO: hysteresis is needed so that when the temperature is close to the desired value the relay does not switch on and off
+    # TODO: sleep screen and wake to touch
+    # TODO make the buttons work: up, down, desired temp
+    # TODO: dim settings
 end
