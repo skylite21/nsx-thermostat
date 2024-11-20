@@ -1,16 +1,22 @@
 import persist
+import math
+import json
 var devicename = tasmota.cmd("DeviceName")["DeviceName"]
 
 tasmota.cmd("State") # Display current device state and publish to %prefix%/%topic%/RESULT topic 
 tasmota.cmd("TelePeriod")
 
-var saved_outdoor_temp = persist.has("saved_outdoor_temp") ? persist.saved_outdoor_temp : "00"
+var saved_outdoor_temp = persist.has("saved_outdoor_temp") ? int(persist.saved_outdoor_temp) : "00"
+var brightness = persist.has("brightness") ? persist.brightness : 100
 var current_indoor_temp = "00"
+var current_outdoor_temp = "00"
 
 var no_touch_sleep_timer = 30
 var touch_wake = 1
 var desired_temp = persist.has("desired_temp") ? persist.desired_temp : "00"
 print("Desired temperature: after reboot:  " + desired_temp)
+
+var last_state_change_time = persist.has("last_state_change_time") ? persist.last_state_change_time : tasmota.millis() - (5 * 60 * 1000)
 
 persist.save()
 
@@ -220,6 +226,61 @@ class Nextion : Driver
         end
     end
 
+    def get_weather()
+      import json
+      var weather_code_list = {
+        "0": "Clear sky",
+        "1": "Mainly clear",
+        "2": "Partly cloudy",
+        "3": "Overcast",
+        "45": "Fog",
+        "48": "Depositing rime fog",
+        "51": "Drizzle: Light intensity",
+        "53": "Drizzle: Moderate intensity",
+        "55": "Drizzle: Dense intensity",
+        "56": "Freezing Drizzle: Light intensity",
+        "57": "Freezing Drizzle: Dense intensity",
+        "61": "Rain: Slight intensity",
+        "63": "Rain: Moderate intensity",
+        "65": "Rain: Heavy intensity",
+        "66": "Freezing Rain: Light intensity",
+        "67": "Freezing Rain: Heavy intensity",
+        "71": "Snow fall: Slight intensity",
+        "73": "Snow fall: Moderate intensity",
+        "75": "Snow fall: Heavy intensity",
+        "77": "Snow grains",
+        "80": "Rain showers: Slight intensity",
+        "81": "Rain showers: Moderate intensity",
+        "82": "Rain showers: Violent intensity",
+        "85": "Snow showers: Slight intensity",
+        "86": "Snow showers: Heavy intensity",
+        "95": "Thunderstorm: Slight or moderate",
+        "96": "Thunderstorm with slight hail",
+        "99": "Thunderstorm with heavy hail"
+      };
+
+      var cl = webclient()
+      #var url = "http://wttr.in/" + loc + '?format=j2'
+      # go to https://open-meteo.com/ if you need an api key
+      var url = 'http://api.open-meteo.com/v1/forecast?latitude=47.48&longitude=19.2539&current=temperature_2m,weather_code&forecast_days=1'
+      cl.set_useragent("curl/7.72.0")
+      cl.set_follow_redirects(true)
+      cl.begin(url)
+      if cl.GET() == "200" || cl.GET() == 200
+        var b = json.load(cl.get_string())
+        var temp = b['current']['temperature_2m']
+        print(b)
+        var weather = weather_code_list[str(b['current']['weather_code'])]
+        log('NSP: Weather update: ' + str(temp) + '°C, ' + weather, 3)
+        persist.saved_outdoor_temp = int(temp)
+        persist.save()
+        return int(temp)
+      else
+        log('NSP: Weather update failed!', 3)
+        return saved_outdoor_temp
+      end
+    end
+
     def handle_thermostat()
       if current_indoor_temp == "00" || desired_temp == "00"
         return
@@ -233,6 +294,27 @@ class Nextion : Driver
         self.send_raw_nextion_command('vis heat,0')
       end
     end
+
+    def set_indoor_temp()
+      var sensors=json.load(tasmota.read_sensors())
+      log('NSP: Indoor temperature: ' + str(sensors), 3)
+      current_indoor_temp = int(sensors['ANALOG']['Temperature1'])
+      var indor_temp = str(math.round(sensors['ANALOG']['Temperature1']))
+      self.send_raw_nextion_command('insideTemp.txt="'+indor_temp+'"')
+    end
+
+
+    def set_outdoor_temp()
+      current_outdoor_temp = self.get_weather()
+      var outdoor_temp = str(math.round(current_outdoor_temp))
+      self.send_raw_nextion_command('outsideTemp.txt="'+outdoor_temp+'"')
+    end
+
+    def update_temps()
+      tasmota.set_timer(55, / -> self.set_indoor_temp())
+      tasmota.set_timer(245, / -> self.set_outdoor_temp())
+    end
+
 
     # Function called every 100 milliseconds to process incoming data
     def every_100ms()
@@ -279,19 +361,37 @@ class Nextion : Driver
                         log("FLH: Something has gone wrong flashing display firmware [" + str(message) + "]", 2)
                     end
                 else
-                    # Handle messages in normal mode
+                    # IF touch event 0x68 occurs call self.update_temps
+                    # Check for the Touch Coordinate (sleep) event (0x68)
+                    if size(message) >= 1 && message[0] == 0x68
+                        print("Touch sleep return (0x68) detected")
+                        do  
+                        self.update_temps()  # Wrap the method call in a closure
+                        end
+                    end
+
+                    # Handle messages as strings
                     var messages = self.split_55(message)
                     # these two lines are all I need I think
                     var string_message = message.asstring()
                     print("My Received message = " + string_message)
                     # if string starts with desired: then save the value after the colon
                     if string.find(string_message, "desired:")>=0
-                        desired_temp = string.split(string_message, ":")[1]
-                        persist.desired_temp = desired_temp
+                        desired_temp = int(string.split(string_message, ":")[1])
+                        persist.desired_temp = int(desired_temp)
                         print("Desired temperature: " + desired_temp)
                         persist.save()
                         self.handle_thermostat()
+
                     end
+                    if string.find(string_message, "brightness:")>=0
+                        brightness = string.split(string_message, ":")[1]
+                        brightness = string.split(brightness, "&")[0]
+                        persist.brightness = int(brightness)
+                        print("Brightness: " + brightness)
+                        persist.save()
+                    end
+
                     # these are not really needed but I keep them for reference
                     for i:0..size(messages)-1
                         message = messages[i]
@@ -532,95 +632,119 @@ var return_code_meanings = {
     # Add other codes as needed
 }
 
-def get_weather()
-  import json
-  var weather_code_list = {
-    "0": "Clear sky",
-    "1": "Mainly clear",
-    "2": "Partly cloudy",
-    "3": "Overcast",
-    "45": "Fog",
-    "48": "Depositing rime fog",
-    "51": "Drizzle: Light intensity",
-    "53": "Drizzle: Moderate intensity",
-    "55": "Drizzle: Dense intensity",
-    "56": "Freezing Drizzle: Light intensity",
-    "57": "Freezing Drizzle: Dense intensity",
-    "61": "Rain: Slight intensity",
-    "63": "Rain: Moderate intensity",
-    "65": "Rain: Heavy intensity",
-    "66": "Freezing Rain: Light intensity",
-    "67": "Freezing Rain: Heavy intensity",
-    "71": "Snow fall: Slight intensity",
-    "73": "Snow fall: Moderate intensity",
-    "75": "Snow fall: Heavy intensity",
-    "77": "Snow grains",
-    "80": "Rain showers: Slight intensity",
-    "81": "Rain showers: Moderate intensity",
-    "82": "Rain showers: Violent intensity",
-    "85": "Snow showers: Slight intensity",
-    "86": "Snow showers: Heavy intensity",
-    "95": "Thunderstorm: Slight or moderate",
-    "96": "Thunderstorm with slight hail",
-    "99": "Thunderstorm with heavy hail"
-  };
-
-  var cl = webclient()
-  #var url = "http://wttr.in/" + loc + '?format=j2'
-  # go to https://open-meteo.com/ if you need an api key
-  var url = 'http://api.open-meteo.com/v1/forecast?latitude=47.48&longitude=19.2539&current=temperature_2m,weather_code&forecast_days=1'
-  cl.set_useragent("curl/7.72.0")
-  cl.set_follow_redirects(true)
-  cl.begin(url)
-  if cl.GET() == "200" || cl.GET() == 200
-    var b = json.load(cl.get_string())
-    var temp = b['current']['temperature_2m']
-    print(b)
-    var weather = weather_code_list[str(b['current']['weather_code'])]
-    log('NSP: Weather update: ' + str(temp) + '°C, ' + weather, 3)
-    persist.saved_outdoor_temp = temp
-    return temp
-  else
-    log('NSP: Weather update failed!', 3)
-    return saved_outdoor_temp
-  end
-end
-
-import json
-import math
-
 def set_indoor_temp()
-  var sensors=json.load(tasmota.read_sensors())
-  log('NSP: Indoor temperature: ' + str(sensors), 3)
-  var temperature = str(math.round(sensors['ANALOG']['Temperature1']))
-  current_indoor_temp = temperature
-  nextion.send_raw_nextion_command('insideTemp.txt="'+temperature+'"')
+  nextion.set_indoor_temp()
 end
+
 
 def set_outdoor_temp()
-  var temperature = str(math.round(get_weather()))
-  nextion.send_raw_nextion_command('outsideTemp.txt="'+temperature+'"')
+  nextion.set_outdoor_temp()
 end
 
 def set_initial_thermostat()
   nextion.handle_thermostat()
 end
 
+def configure_brightness()
+  print("Setting brightness to: " + str(brightness))
+  nextion.send_raw_nextion_command('dim='+str(brightness))
+end
+
+def set_initial_outdoor_temp()
+  if (saved_outdoor_temp != "00")
+    nextion.send_raw_nextion_command('outsideTemp.txt="'+str(int(saved_outdoor_temp))+'"')
+  end
+end
+
+
 # WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
 # to fix temperature readings (much more accurate results after this)
 # ADCParam1 2,12400,8800,3950
 
+tasmota.set_timer(0, configure_brightness)
+
 tasmota.set_timer(100, set_indoor_temp)
 tasmota.add_cron("*/10 * * * * *", set_indoor_temp, 'set_indoor_temp')
+tasmota.set_timer(200, set_initial_outdoor_temp)
 
 tasmota.set_timer(2000, set_outdoor_temp)
 tasmota.add_cron("*/60 * * * * *", set_outdoor_temp, 'set_outdoor_temp')
 
 tasmota.set_timer(50, set_initial_thermostat)
 
+
 def hold_desired_temp()
-    # TODO: hysteresis is needed so that when the temperature is close to the desired value the relay does not switch on and off
-    # TODO: sleep screen and wake to touch
-    # TODO make the buttons work: up, down, desired temp
-    # TODO: dim settings
+    # Check if temperature readings are valid
+    if current_indoor_temp == "00" || desired_temp == "00"
+        return
+    end
+
+    var hysteresis = 1.0  # 1°C hysteresis as per your requirement
+
+    # Calculate thresholds with hysteresis
+    var heater_on_threshold = desired_temp - (hysteresis / 2)
+    var heater_off_threshold = desired_temp + (hysteresis / 2)
+
+    # Define minimum time between heater state changes (5 minutes in milliseconds)
+    var min_switch_interval_ms = 5 * 60 * 1000  # 300,000 milliseconds
+    var current_time_ms = tasmota.millis()
+
+    var time_since_last_change = current_time_ms - last_state_change_time
+
+    # Get current heater state from Tasmota (boolean true or false)
+    var heater_is_on = tasmota.get_power()[0]  # Returns true (on) or false (off)
+
+    # Determine desired heater state based on temperature and hysteresis
+    var heater_should_be_on = heater_is_on  # Assume the heater state remains the same
+
+    if time_since_last_change >= min_switch_interval_ms
+        if heater_is_on
+            # Heater is currently ON; check if it should be turned OFF
+            if current_indoor_temp >= heater_off_threshold
+                heater_should_be_on = false
+            end
+        else
+            # Heater is currently OFF; check if it should be turned ON
+            if current_indoor_temp <= heater_on_threshold
+                heater_should_be_on = true
+            end
+        end
+    else
+        # Within the minimum switch interval; maintain current heater state
+        heater_should_be_on = heater_is_on
+    end
+
+    # Update heater state if it has changed
+    if heater_should_be_on != heater_is_on
+        if heater_should_be_on
+            tasmota.cmd("Power1 ON")  # Turn heater ON
+            nextion.send_raw_nextion_command('vis heat,1')  # Show heating indicator
+        else
+            tasmota.cmd("Power1 OFF")  # Turn heater OFF
+            nextion.send_raw_nextion_command('vis heat,0')  # Hide heating indicator
+        end
+        # Update the last state change time
+        last_state_change_time = current_time_ms
+        persist.last_state_change_time = last_state_change_time  # Save persistently
+        persist.save()
+    else
+        # Ensure the heating indicator matches the current heater state
+        if heater_is_on
+            nextion.send_raw_nextion_command('vis heat,1')
+        else
+            nextion.send_raw_nextion_command('vis heat,0')
+        end
+    end
+
+    # Update the target temperature on the Nextion display
+    nextion.send_raw_nextion_command('targetTemp.val=' + desired_temp)
 end
+
+
+# Schedule the hold_desired_temp function to run every 5 minutes
+tasmota.add_cron("0 */5 * * * *", hold_desired_temp, 'hold_desired_temp')
+
+# hold_desired_temp is fucked up 17:20:00.308 BRY: Exception> 'type_error' - unsupported operand type(s) for -: 'string' and 'real'
+# TODO make the physical buttons work: up, down, desired temp
+# TODO restore the brightness setting on the settings page
+# TODO Add restart button in settings!
