@@ -49,7 +49,12 @@ To ignore default button behaviour of controlling power outputs enter this comma
 
 ```
 SetOption73 1
+
 ``` 
 
 
-
+# Rules to control the buttons (optional)
+```
+Rule1
+ON Event#SendButtons DO Backlog Publish2 stat/%topic%/BUTTON {"Button1":{"Action":"SINGLE"}}; Publish2 stat/%topic%/BUTTON {"Button2":{"Action":"SINGLE"}} ENDON
+```
