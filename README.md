@@ -42,6 +42,14 @@ The temperature sensor in the SonOFF NSPanel is not very accurate. If you enter 
 
 ```bash
 
-```
 ADCParam1 2,12400,8800,3950
 ```
+
+To ignore default button behaviour of controlling power outputs enter this command in the console:
+
+```
+SetOption73 1
+``` 
+
+
+

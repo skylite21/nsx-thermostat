@@ -12,6 +12,10 @@ var saved_outdoor_temp = persist.has("saved_outdoor_temp") ? persist.saved_outdo
 var brightness = persist.has("brightness") ? persist.brightness : 100
 var desired_temp = persist.has("desired_temp") ? persist.desired_temp : 20
 var last_state_change_time = persist.has("last_state_change_time") ? persist.last_state_change_time : tasmota.millis() - (5 * 60 * 1000)
+var device_loc = persist.has("device_loc") ? persist.device_loc : "Living Room"
+
+var previous_page = ""
+var current_page = ""
 
 persist.save()
 
@@ -111,10 +115,24 @@ class Nextion : Driver
     end
 
     # Function to send Nextion commands to the display
+    # !! Important: this function is used for flashing only, ootherwise use send_raw_nextion_command
     def send_nextion_command(command)
         var command_bytes = self.encode_nextion_command(command)
         self.serial_port.write(command_bytes)
         log(string.format("NXP: Nextion command sent = %s", str(command_bytes)), 3)       
+    end
+
+    # Function to send a Nextion command. This function is
+    # used when not flashing
+    def send_raw_nextion_command(command)
+        if self.flash_mode == 1
+          print("Flashing mode is enabled, ignoring command: " + command)
+          return
+        end
+        print("NXP: Sending command: " + command)
+        var b = bytes().fromstring(command)
+        b += bytes('FFFFFF')  # Add termination bytes
+        self.serial_port.write(b)
     end
 
     # Function to initialize the screen
@@ -291,6 +309,22 @@ class Nextion : Driver
       tasmota.set_timer(245, / -> self.set_outdoor_temp())
     end
 
+    def update_home_page()
+      var heater_is_on = tasmota.get_power()[0]  # Returns true (on) or false (off)
+      if heater_is_on
+          self.send_raw_nextion_command('vis heat,1')
+      else
+          self.send_raw_nextion_command('vis heat,0')
+      end
+      self.update_temps()
+    end
+
+    def update_settings_page()
+      self.send_raw_nextion_command('device_loc.txt="'+str(device_loc)+'"')
+      self.send_raw_nextion_command('brightness.val='+str(brightness))
+    end
+
+
     # The nextion will send the data in a query string-like syntax (because
     # that is how I chosed doing from nsx.hmi) so we need to parse it
     def parse_querystring(qs)
@@ -335,20 +369,42 @@ class Nextion : Driver
                     print("My Received message = " + string_message)
 
                     var data = self.parse_querystring(string_message)
-                    # if string starts with desired: then save the value after the colon
                     if data.has("desired")
-                        desired_temp = data["desired"]
+                        desired_temp = int(data["desired"])
                         persist.desired_temp = int(data["desired"])
                         persist.save()
                         log("Desired temperature: " + data["desired"], 3)
                         self.handle_thermostat()
-
                     end
+
                     if data.has("brightness")
                         brightness = data["brightness"]
                         persist.brightness = int(brightness)
                         persist.save()
-                        log("Brightness: " + brightness, 3)
+                        log("Brightness changed and saved to persist.json: " + brightness, 3)
+                    end
+
+                    if data.has("device_loc")
+                        persist.device_loc = data["device_loc"]
+                        device_loc = data["device_loc"]
+                        persist.save()
+                        log("Device location: " + data["device_loc"], 3)
+                    end
+
+                    if data.has("restart")
+                      if data["restart"] == "1"
+                        tasmota.cmd("Restart 1")
+                      end
+                    end
+
+                    if data.has("current_page")
+                        previous_page = current_page
+                        current_page = data["current_page"]
+                        if current_page == "settings" && previous_page != "settings"
+                            self.update_settings_page()
+                        elif current_page == "home"
+                            self.update_home_page()
+                        end
                     end
 
                     # these are not really needed but I keep them for reference
@@ -370,10 +426,10 @@ class Nextion : Driver
                         end       
                     end
                 end
-            end
 #        else
 #          print("NXP: Waiting for data...")
-        end
+            end
+         end
     end      
 
     def parse_url(url)
@@ -416,13 +472,6 @@ class Nextion : Driver
       return result
     end
 
-    # Function to send a Nextion command and print response
-    def send_raw_nextion_command(command)
-        print("NXP: Sending command: " + command)
-        var b = bytes().fromstring(command)
-        b += bytes('FFFFFF')  # Add termination bytes
-        self.serial_port.write(b)
-    end
 
     
     # Function to open the firmware URL at a specific position (offset)
@@ -577,8 +626,6 @@ class Nextion : Driver
           log("FLH: Something has gone wrong flashing display firmware [" + str(message) + "]", 2)
       end
     end
-
-
 end
 
 var nextion = Nextion()
@@ -613,6 +660,10 @@ def set_initial_thermostat()
   nextion.handle_thermostat()
 end
 
+def set_initial_settings()
+  nextion.update_settings_page()
+end
+
 def configure_brightness()
   print("Setting brightness to: " + str(brightness))
   nextion.send_raw_nextion_command('dim='+str(brightness))
@@ -625,6 +676,9 @@ def set_initial_outdoor_temp()
 end
 
 def hold_desired_temp()
+    # Ensure that desired_temp and current_indoor_temp are numbers
+    desired_temp = int(desired_temp)
+    current_indoor_temp = int(current_indoor_temp)
     # Check if temperature readings are valid
     print("Holding desired temperature: " + str(desired_temp)+ " while current indoor temp is: " + str(current_indoor_temp))
     if current_indoor_temp == 0 || desired_temp == 0
@@ -698,6 +752,30 @@ def hold_desired_temp()
     nextion.send_raw_nextion_command('targetTemp.val=' + str(desired_temp))
 end
 
+
+# Function to increase desired temperature
+def increase_desired_temp(cmd, idx, payload, payload_json)
+    desired_temp = int(desired_temp) + 1
+    persist.desired_temp = desired_temp
+    persist.save()
+    nextion.handle_thermostat()
+    print("Desired temperature increased (with buttons) to: " + str(desired_temp))
+end
+
+tasmota.add_cmd('IncreaseDesiredTemp', increase_desired_temp)
+
+# Function to decrease desired temperature
+def decrease_desired_temp(cmd, idx, payload, payload_json)
+    desired_temp = int(desired_temp) - 1
+    persist.desired_temp = desired_temp
+    persist.save()
+    nextion.handle_thermostat()
+    print("Desired temperature decreased (with buttons) to: " + str(desired_temp))
+end
+
+tasmota.add_cmd('DecreaseDesiredTemp', decrease_desired_temp)
+
+
 # WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
 # to fix temperature readings (much more accurate results after this)
 # ADCParam1 2,12400,8800,3950
@@ -706,6 +784,7 @@ tasmota.set_timer(0, configure_brightness)
 tasmota.set_timer(50, set_indoor_temp)
 tasmota.set_timer(100, set_initial_thermostat)
 tasmota.set_timer(200, set_initial_outdoor_temp)
+tasmota.set_timer(300, set_initial_settings)
 tasmota.set_timer(2000, set_outdoor_temp)
 
 tasmota.add_cron("*/60 * * * * *", set_outdoor_temp, 'set_outdoor_temp')
@@ -715,7 +794,5 @@ tasmota.add_cron("*/10 * * * * *", set_indoor_temp, 'set_indoor_temp')
 #TODO change this back to */5 * * * * * after deving
 tasmota.add_cron("0 */1 * * * *", hold_desired_temp, 'hold_desired_temp')
 
-# TODO make the physical buttons work: up, down, desired temp
-# TODO restore the brightness setting on the settings page
 # TODO Add restart button in settings!
-# TODO after going back from settings the home page is not updated properly
+# TODO make the physical buttons work: up, down, desired temp
