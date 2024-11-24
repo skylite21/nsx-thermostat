@@ -2,6 +2,7 @@ import persist
 import math
 import json
 import string
+import mqtt
 
 # NOTE: inside the nextion display we treat everything as string even if they
 # are numbers. This is necessary because if the nextion display sends back
@@ -573,12 +574,12 @@ class Nextion : Driver
     # Function to begin the flashing process
     def begin_nextion_flash()
         # We need to reinitialize the serial port for flashing
+        # exit sleep mode: wake up the screen
         self.send_nextion_command('sleep=0')
         self.send_nextion_command('sleep=0')
         tasmota.delay(1000)
         self.serial_port.deinit()
         self.serial_port = serial(17, 16, 115200, serial.SERIAL_8N1)
-        # wake the screen up
         self.flash_written = 0
         self.waiting_for_offset = 0
         self.flash_offset = 0
@@ -752,28 +753,28 @@ def hold_desired_temp()
     nextion.send_raw_nextion_command('targetTemp.val=' + str(desired_temp))
 end
 
-
-# Function to increase desired temperature
-def increase_desired_temp(cmd, idx, payload, payload_json)
-    desired_temp = int(desired_temp) + 1
-    persist.desired_temp = desired_temp
-    persist.save()
-    nextion.handle_thermostat()
-    print("Desired temperature increased (with buttons) to: " + str(desired_temp))
+def button1_handler(topic, idx, payload_s, payload_b)
+  print("Button1 pressed")
+  nextion.send_nextion_command('sleep=0')
+  desired_temp = int(desired_temp) - 1
+  persist.desired_temp = desired_temp
+  persist.save()
+  nextion.handle_thermostat()
+  print("Desired temperature decreased (with buttons) to: " + str(desired_temp))
 end
 
-tasmota.add_cmd('IncreaseDesiredTemp', increase_desired_temp)
-
-# Function to decrease desired temperature
-def decrease_desired_temp(cmd, idx, payload, payload_json)
-    desired_temp = int(desired_temp) - 1
-    persist.desired_temp = desired_temp
-    persist.save()
-    nextion.handle_thermostat()
-    print("Desired temperature decreased (with buttons) to: " + str(desired_temp))
+def button2_handler(topic, idx, payload_s, payload_b)
+  print("Button2 pressed")
+  nextion.send_nextion_command('sleep=0')
+  desired_temp = int(desired_temp) + 1
+  persist.desired_temp = desired_temp
+  persist.save()
+  nextion.handle_thermostat()
+  print("Desired temperature increased (with buttons) to: " + str(desired_temp))
 end
 
-tasmota.add_cmd('DecreaseDesiredTemp', decrease_desired_temp)
+tasmota.add_rule("Button1#Action", button1_handler)
+tasmota.add_rule("Button2#Action", button2_handler)
 
 
 # WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
@@ -791,8 +792,4 @@ tasmota.add_cron("*/60 * * * * *", set_outdoor_temp, 'set_outdoor_temp')
 tasmota.add_cron("*/10 * * * * *", set_indoor_temp, 'set_indoor_temp')
 
 # Schedule the hold_desired_temp function to run every 5 minutes
-#TODO change this back to */5 * * * * * after deving
-tasmota.add_cron("0 */1 * * * *", hold_desired_temp, 'hold_desired_temp')
-
-# TODO Add restart button in settings!
-# TODO make the physical buttons work: up, down, desired temp
+tasmota.add_cron("0 */5 * * * *", hold_desired_temp, 'hold_desired_temp')
