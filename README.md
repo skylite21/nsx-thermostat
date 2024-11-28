@@ -44,6 +44,13 @@ The temperature sensor in the SonOFF NSPanel is not very accurate. If you enter 
 
 ADCParam1 2,12400,8800,3950
 ```
+or this is a new one which is even better:
+
+```bash
+AdcParam1 2,12000,9900,3950
+```
+
+
 
 To ignore default button behaviour of controlling power outputs enter this command in the console:
 

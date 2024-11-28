@@ -3,6 +3,7 @@ import math
 import json
 import string
 import mqtt
+import json
 
 # NOTE: inside the nextion display we treat everything as string even if they
 # are numbers. This is necessary because if the nextion display sends back
@@ -775,6 +776,18 @@ end
 
 tasmota.add_rule("Button1#Action", button1_handler)
 tasmota.add_rule("Button2#Action", button2_handler)
+
+# this will aloow you to do this: curl "http://192.168.99.61/cm?cmnd=do_button2_action"
+tasmota.add_cmd("do_button1_action", button1_handler)
+tasmota.add_cmd("do_button2_action", button2_handler)
+
+def get_info_handler(cmd, args)
+  var response = json.dump({'desired_temp':desired_temp,'current_indoor_temp':current_indoor_temp})
+  tasmota.resp_cmnd(response)
+end
+
+# with this you cand do curl "http://192.168.99.61/cm?cmnd=get_info"
+tasmota.add_cmd("get_info", get_info_handler)
 
 
 # WARNING: TEMP READER FIX FOR SONOFF NSPANEL, add this to the tasmota console
