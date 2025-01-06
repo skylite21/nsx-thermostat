@@ -774,12 +774,23 @@ def button2_handler(topic, idx, payload_s, payload_b)
   print("Desired temperature increased (with buttons) to: " + str(desired_temp))
 end
 
+def set_desired_temp_handler(topic, idx, payload)
+  nextion.send_nextion_command('sleep=0')
+  desired_temp = int(payload)
+  persist.desired_temp = desired_temp
+  persist.save()
+  nextion.handle_thermostat()
+  print("Desired temperature increased (with buttons) to: " + str(desired_temp))
+end
+
 tasmota.add_rule("Button1#Action", button1_handler)
 tasmota.add_rule("Button2#Action", button2_handler)
 
 # this will aloow you to do this: curl "http://192.168.99.61/cm?cmnd=do_button2_action"
 tasmota.add_cmd("do_button1_action", button1_handler)
 tasmota.add_cmd("do_button2_action", button2_handler)
+
+tasmota.add_cmd("do_set_desired_temp", set_desired_temp_handler)
 
 def get_info_handler(cmd, args)
   var response = json.dump({'desired_temp':desired_temp,'current_indoor_temp':current_indoor_temp})

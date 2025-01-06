@@ -50,21 +50,18 @@ or this is a new one which is even better:
 AdcParam1 2,12000,9900,3950
 ```
 
+The panel has two physical buttons which are used to set the desired temperature (touch also works of course)
+To avoid the default behaviour of the buttons controlling the power outputs, you can enter this command in the console:
 
-
-To ignore default button behaviour of controlling power outputs enter this command in the console:
-
-```
+```bash
 SetOption73 1
-
-``` 
-
-
-# Rules to control the buttons (optional)
 ```
-Rule1
-ON Event#SendButtons DO Backlog Publish2 stat/%topic%/BUTTON {"Button1":{"Action":"SINGLE"}}; Publish2 stat/%topic%/BUTTON {"Button2":{"Action":"SINGLE"}} ENDON
-```
+
+# other references
+
+The Panel has a NX4832F035_011C screen and the following instructionset was used in the autoexec.be file:
+
+https://nextion.tech/instruction-set/
 
 Tasmota flashing commands (from the youtube video)
 
