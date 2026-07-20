@@ -3,7 +3,6 @@ import math
 import json
 import string
 import mqtt
-import json
 
 # NOTE: inside the nextion display we treat everything as string even if they
 # are numbers. This is necessary because if the nextion display sends back
@@ -23,7 +22,6 @@ persist.save()
 
 var current_outdoor_temp = saved_outdoor_temp
 var current_indoor_temp = 0
-var no_touch_sleep_timer = 30
 print("Desired temperature: after reboot:  " + str(desired_temp))
 
 tasmota.cmd("State") # Display current device state and publish to %prefix%/%topic%/RESULT topic 
@@ -47,7 +45,7 @@ var return_code_meanings = {
 }
 
 
-# utility function of returning the minimum of two numbers
+# Returns the minimum of two numbers
 def min(a, b)
   if a < b
       return a
@@ -117,7 +115,7 @@ class Nextion : Driver
     end
 
     # Function to send Nextion commands to the display
-    # !! Important: this function is used for flashing only, ootherwise use send_raw_nextion_command
+    # !! Important: this function is used for flashing only, otherwise use send_raw_nextion_command
     def send_nextion_command(command)
         var command_bytes = self.encode_nextion_command(command)
         self.serial_port.write(command_bytes)
@@ -132,9 +130,9 @@ class Nextion : Driver
           return
         end
         print("NXP: Sending command: " + command)
-        var b = bytes().fromstring(command)
-        b += bytes('FFFFFF')  # Add termination bytes
-        self.serial_port.write(b)
+        var command_bytes = bytes().fromstring(command)
+        command_bytes += bytes('FFFFFF')  # Add termination bytes
+        self.serial_port.write(command_bytes)
     end
 
     # Function to initialize the screen
@@ -255,17 +253,15 @@ class Nextion : Driver
       };
 
       var cl = webclient()
-      #var url = "http://wttr.in/" + loc + '?format=j2'
       # go to https://open-meteo.com/ if you need an api key
       var url = 'http://api.open-meteo.com/v1/forecast?latitude=47.48&longitude=19.2539&current=temperature_2m,weather_code&forecast_days=1'
       cl.set_useragent("curl/7.72.0")
       cl.set_follow_redirects(true)
       cl.begin(url)
       if cl.GET() == "200" || cl.GET() == 200
-        var b = json.load(cl.get_string())
-        var temp = b['current']['temperature_2m']
-        print(b)
-        var weather = weather_code_list[str(b['current']['weather_code'])]
+        var weather_response = json.load(cl.get_string())
+        var temp = weather_response['current']['temperature_2m']
+        var weather = weather_code_list[str(weather_response['current']['weather_code'])]
         log('NSP: Weather update: ' + str(temp) + '°C, ' + weather, 3)
         persist.saved_outdoor_temp = int(temp)
         persist.save()
@@ -294,8 +290,8 @@ class Nextion : Driver
       var sensors=json.load(tasmota.read_sensors())
       log('SENSOR: Indoor temperature: ' + str(sensors), 3)
       current_indoor_temp = int(sensors['ANALOG']['Temperature1'])
-      var indor_temp = str(math.round(sensors['ANALOG']['Temperature1']))
-      self.send_raw_nextion_command('insideTemp.txt="'+indor_temp+'"')
+      var indoor_temp = str(math.round(sensors['ANALOG']['Temperature1']))
+      self.send_raw_nextion_command('insideTemp.txt="'+indoor_temp+'"')
     end
 
 
@@ -327,13 +323,13 @@ class Nextion : Driver
     end
 
 
-    # The nextion will send the data in a query string-like syntax (because
-    # that is how I chosed doing from nsx.hmi) so we need to parse it
+    # The Nextion display sends touch/UI events as a query string (that's how
+    # it was implemented in nsx.hmi), e.g. "brightness=100&desired=20", so we
+    # need to parse it into a dictionary here.
     def parse_querystring(qs)
-        import string
         var result = {}  # Initialize an empty dictionary
         var pairs = string.split(qs, '&')  # Split the string by '&' to get key-value pairs
-        for pair : pairs  # Corrected 'for' loop syntax
+        for pair : pairs
             var idx = string.find(pair, '=')
             if idx >= 0
                 var key = pair[0..(idx - 1)]
@@ -364,11 +360,12 @@ class Nextion : Driver
                         end
                     end
 
-                    # Handle messages as strings
+                    # Split the raw stream into individual 0x55BB-delimited messages
                     var messages = self.split_55(message)
-                    # these two lines are all I need I think
+                    # The query-string commands (desired temp, brightness, etc.) arrive
+                    # as plain text, so decode the whole buffer as a string too
                     var string_message = message.asstring()
-                    print("My Received message = " + string_message)
+                    print("Received message = " + string_message)
 
                     var data = self.parse_querystring(string_message)
                     if data.has("desired")
@@ -409,7 +406,8 @@ class Nextion : Driver
                         end
                     end
 
-                    # these are not really needed but I keep them for reference
+                    # Handle the individual 0x55BB-delimited messages split out above
+                    # (custom protocol replies, buzzer/bell events, screen-init handshake)
                     for i:0..size(messages)-1
                         message = messages[i]
                         if size(message) > 0
@@ -428,11 +426,9 @@ class Nextion : Driver
                         end       
                     end
                 end
-#        else
-#          print("NXP: Waiting for data...")
             end
          end
-    end      
+    end
 
     def parse_url(url)
       var protocol = ""
@@ -780,13 +776,13 @@ def set_desired_temp_handler(topic, idx, payload)
   persist.desired_temp = desired_temp
   persist.save()
   nextion.handle_thermostat()
-  print("Desired temperature increased (with buttons) to: " + str(desired_temp))
+  print("Desired temperature set (via MQTT/HTTP) to: " + str(desired_temp))
 end
 
 tasmota.add_rule("Button1#Action", button1_handler)
 tasmota.add_rule("Button2#Action", button2_handler)
 
-# this will aloow you to do this: curl "http://192.168.99.61/cm?cmnd=do_button2_action"
+# this will allow you to do this: curl "http://192.168.99.61/cm?cmnd=do_button2_action"
 tasmota.add_cmd("do_button1_action", button1_handler)
 tasmota.add_cmd("do_button2_action", button2_handler)
 
@@ -797,7 +793,7 @@ def get_info_handler(cmd, args)
   tasmota.resp_cmnd(response)
 end
 
-# with this you cand do curl "http://192.168.99.61/cm?cmnd=get_info"
+# with this you can do curl "http://192.168.99.61/cm?cmnd=get_info"
 tasmota.add_cmd("get_info", get_info_handler)
 
 
